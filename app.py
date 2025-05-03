@@ -16,14 +16,19 @@ if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY не найден в переменных окружения")
 
 genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')  # Используем быструю модель
+model = genai.GenerativeModel('gemini-1.5-flash')  # Используем быструю модель
 
 app = FastAPI()
 
-# Настройка CORS для локальной разработки
+# Настройка CORS для GitHub Pages и локальной разработки
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # В продакшене заменить на конкретный домен
+    allow_origins=[
+        "https://maks-mk.github.io",  # GitHub Pages
+        "http://localhost:8000",      # Локальная разработка
+        "http://127.0.0.1:8000",
+        "*"                           # В продакшене лучше убрать и указать конкретные домены
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,9 +99,12 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Обслуживание статических файлов - должно быть ПОСЛЕ API эндпоинтов
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+# При деплое на Render этот код нужно закомментировать, так как
+# там используется только API без раздачи статики
+if os.getenv("ENVIRONMENT") != "production":
+    app.mount("/", StaticFiles(directory=".", html=True), name="static")
 
 # Запуск сервера
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=80) 
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000"))) 

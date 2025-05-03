@@ -4,3 +4,4 @@ pymupdf
 python-dotenv
 google-generativeai
 pydantic
+gunicorn
