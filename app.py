@@ -16,7 +16,7 @@ if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY не найден в переменных окружения")
 
 genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')  # Используем быструю модель
+model = genai.GenerativeModel('gemini-2.0-flash')  # Используем быструю модель
 
 app = FastAPI()
 
