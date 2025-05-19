@@ -6,6 +6,8 @@ import os
 import fitz  # PyMuPDF
 import google.generativeai as genai
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+import docx  # для чтения .docx файлов
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -18,7 +20,66 @@ if not GOOGLE_API_KEY:
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('gemini-2.0-flash')  # Используем быструю модель
 
-app = FastAPI()
+# Глобальная переменная для хранения текста
+resume_text = ""
+
+# Функция для извлечения текста из PDF
+def extract_text_from_pdf(pdf_path):
+    text = ""
+    try:
+        doc = fitz.open(pdf_path)
+        for page in doc:
+            text += page.get_text()
+        return text
+    except Exception as e:
+        print(f"Ошибка при чтении PDF: {e}")
+        return ""
+
+# Функция для извлечения текста из DOCX
+def extract_text_from_docx(docx_path):
+    text = ""
+    try:
+        doc = docx.Document(docx_path)
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+        
+        # Также извлекаем текст из таблиц, если они есть
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    text += cell.text + " "
+                text += "\n"
+        
+        return text
+    except Exception as e:
+        print(f"Ошибка при чтении DOCX: {e}")
+        return ""
+
+# Определяем контекст жизненного цикла приложения
+@asynccontextmanager
+async def lifespan(app):
+    # Код, выполняемый при запуске приложения
+    global resume_text
+    docx_path = "data2.docx"
+    
+    if os.path.exists(docx_path):
+        resume_text = extract_text_from_docx(docx_path)
+        print(f"Текст из резюме (DOCX) загружен, {len(resume_text)} символов")
+    else:
+        # Запасной вариант - попробовать загрузить PDF, если DOCX не найден
+        pdf_path = "data.pdf"
+        if os.path.exists(pdf_path):
+            resume_text = extract_text_from_pdf(pdf_path)
+            print(f"Текст из резюме (PDF) загружен, {len(resume_text)} символов")
+        else:
+            print(f"Файлы {docx_path} и {pdf_path} не найдены")
+    
+    yield
+    # Код, выполняемый при завершении работы приложения
+    # Можно добавить очистку ресурсов, если требуется
+
+# Создаем приложение FastAPI с обработчиком жизненного цикла
+app = FastAPI(lifespan=lifespan)
 
 # Настройка CORS для GitHub Pages и локальной разработки
 app.add_middleware(
@@ -37,32 +98,6 @@ app.add_middleware(
 # Класс для запроса
 class ChatRequest(BaseModel):
     message: str
-
-# Глобальная переменная для хранения текста из PDF
-resume_text = ""
-
-# Функция для извлечения текста из PDF
-def extract_text_from_pdf(pdf_path):
-    text = ""
-    try:
-        doc = fitz.open(pdf_path)
-        for page in doc:
-            text += page.get_text()
-        return text
-    except Exception as e:
-        print(f"Ошибка при чтении PDF: {e}")
-        return ""
-
-# Загрузка текста резюме при запуске сервера
-@app.on_event("startup")
-async def startup_event():
-    global resume_text
-    pdf_path = "resume.pdf"
-    if os.path.exists(pdf_path):
-        resume_text = extract_text_from_pdf(pdf_path)
-        print(f"Текст из резюме загружен, {len(resume_text)} символов")
-    else:
-        print(f"Файл {pdf_path} не найден")
 
 # ВАЖНО: API эндпоинты должны быть определены ПЕРЕД монтированием статических файлов!
 # Эндпоинт для чата
@@ -97,6 +132,11 @@ async def chat(request: ChatRequest):
     except Exception as e:
         print(f"Ошибка API: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+        
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
 
 # Обслуживание статических файлов - должно быть ПОСЛЕ API эндпоинтов
 # При деплое на Render этот код нужно закомментировать, так как
