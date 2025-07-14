@@ -133,9 +133,11 @@ async def chat(request: ChatRequest):
         print(f"Ошибка API: {e}")
         raise HTTPException(status_code=500, detail=str(e))
         
-@app.get("/ping")
+from fastapi.responses import JSONResponse
+
+@app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
-    return {"status": "ok"}
+    return JSONResponse(content={"status": "ok"})
 
 
 # Обслуживание статических файлов - должно быть ПОСЛЕ API эндпоинтов
