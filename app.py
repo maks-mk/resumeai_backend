@@ -1,152 +1,97 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 import os
-import fitz  # PyMuPDF
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import google.generativeai as genai
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
-import docx  # для чтения .docx файлов
+import logging
+from datetime import datetime
+import json
 
-# Загрузка переменных окружения
+# Load environment variables
 load_dotenv()
 
-# Инициализация API Gemini
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY не найден в переменных окружения")
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')  # Используем быструю модель
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)
 
-# Глобальная переменная для хранения текста
-resume_text = ""
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("models/gemini-flash-lite-latest")
 
-# Функция для извлечения текста из PDF
-def extract_text_from_pdf(pdf_path):
-    text = ""
+# Store chat history for context
+chat_history = []
+
+@app.route("/api/analyze", methods=["POST"])
+def analyze_resume():
+    """Endpoint to analyze resume and provide feedback"""
     try:
-        doc = fitz.open(pdf_path)
-        for page in doc:
-            text += page.get_text()
-        return text
-    except Exception as e:
-        print(f"Ошибка при чтении PDF: {e}")
-        return ""
-
-# Функция для извлечения текста из DOCX
-def extract_text_from_docx(docx_path):
-    text = ""
-    try:
-        doc = docx.Document(docx_path)
-        for para in doc.paragraphs:
-            text += para.text + "\n"
+        data = request.json
+        resume_text = data.get("resume_text", "")
         
-        # Также извлекаем текст из таблиц, если они есть
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    text += cell.text + " "
-                text += "\n"
+        if not resume_text:
+            return jsonify({"error": "No resume text provided"}), 400
         
-        return text
-    except Exception as e:
-        print(f"Ошибка при чтении DOCX: {e}")
-        return ""
+        # Create a prompt for resume analysis
+        analysis_prompt = f"""Analyze the following resume and provide constructive feedback on:
+1. Overall structure and format
+2. Content clarity and relevance
+3. Achievements and metrics
+4. Suggestions for improvement
 
-# Определяем контекст жизненного цикла приложения
-@asynccontextmanager
-async def lifespan(app):
-    # Код, выполняемый при запуске приложения
-    global resume_text
-    docx_path = "data2.docx"
-    
-    if os.path.exists(docx_path):
-        resume_text = extract_text_from_docx(docx_path)
-        print(f"Текст из резюме (DOCX) загружен, {len(resume_text)} символов")
-    else:
-        # Запасной вариант - попробовать загрузить PDF, если DOCX не найден
-        pdf_path = "data.pdf"
-        if os.path.exists(pdf_path):
-            resume_text = extract_text_from_pdf(pdf_path)
-            print(f"Текст из резюме (PDF) загружен, {len(resume_text)} символов")
-        else:
-            print(f"Файлы {docx_path} и {pdf_path} не найдены")
-    
-    yield
-    # Код, выполняемый при завершении работы приложения
-    # Можно добавить очистку ресурсов, если требуется
-
-# Создаем приложение FastAPI с обработчиком жизненного цикла
-app = FastAPI(lifespan=lifespan)
-
-# Настройка CORS для GitHub Pages и локальной разработки
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://maks-mk.github.io",  # GitHub Pages
-        "http://localhost:8000",      # Локальная разработка
-        "http://127.0.0.1:8000",
-        "*"                           # В продакшене лучше убрать и указать конкретные домены
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Класс для запроса
-class ChatRequest(BaseModel):
-    message: str
-
-# ВАЖНО: API эндпоинты должны быть определены ПЕРЕД монтированием статических файлов!
-# Эндпоинт для чата
-@app.post("/chat")
-async def chat(request: ChatRequest):
-    if not resume_text:
-        raise HTTPException(status_code=500, detail="Резюме не загружено")
-    
-    try:
-        # Создаем контекст с информацией из резюме
-        system_prompt = """Ты AI-ассистент, который помогает посетителям сайта отвечать на вопросы о резюме Колесникова Максима. 
-        Отвечай кратко, по делу, дружелюбно. Используй только информацию из резюме.
+Resume:
+{resume_text}"""
         
-        ВАЖНО: 
-        1. Ты отвечаешь о кандидате в третьем лице (он, Максим, кандидат) - а не от его имени.
-        2. Посетитель сайта - это потенциальный работодатель, который задает вопросы о кандидате.
-        3. Если тебя спрашивают как ты можешь помочь, опиши что ты можешь рассказать о кандидате.
+        # Send to Gemini
+        response = model.generate_content(analysis_prompt)
         
-        Вот резюме Колесникова Максима:
-        """ + resume_text
-        
-        # Отправляем запрос в Gemini
-        response = model.generate_content(
-            contents=[
-                {"role": "user", "parts": [system_prompt]},
-                {"role": "user", "parts": [request.message]}
-            ]
-        )
-        
-        return {"response": response.text}
+        return jsonify({
+            "analysis": response.text,
+            "timestamp": datetime.now().isoformat()
+        })
     
     except Exception as e:
-        print(f"Ошибка API: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error analyzing resume: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """Endpoint for chatting about resume"""
+    try:
+        data = request.json
+        user_message = data.get("message", "")
         
-from fastapi.responses import JSONResponse
+        if not user_message:
+            return jsonify({"error": "No message provided"}), 400
+        
+        # Add to chat history
+        chat_history.append({"role": "user", "content": user_message})
+        
+        # Create context from chat history
+        context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
+        
+        # Send to Gemini
+        response = model.generate_content(context)
+        
+        # Add response to history
+        chat_history.append({"role": "assistant", "content": response.text})
+        
+        return jsonify({
+            "response": response.text,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    except Exception as e:
+        logger.error(f"Error in chat: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-@app.api_route("/ping", methods=["GET", "HEAD"])
-async def ping():
-    return JSONResponse(content={"status": "ok"})
+@app.route("/api/health", methods=["GET"])
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "healthy"}), 200
 
-
-# Обслуживание статических файлов - должно быть ПОСЛЕ API эндпоинтов
-# При деплое на Render этот код нужно закомментировать, так как
-# там используется только API без раздачи статики
-if os.getenv("ENVIRONMENT") != "production":
-    app.mount("/", StaticFiles(directory=".", html=True), name="static")
-
-# Запуск сервера
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000"))) 
+    app.run(debug=True)
