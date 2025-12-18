@@ -30,7 +30,7 @@ if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY обязателен")
 
 # Используем актуальную модель (1.5 Flash - быстрая и дешевая/бесплатная)
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 DOCX_PATH = "data2.docx"
 PDF_PATH = "data.pdf"
 
