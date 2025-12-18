@@ -1,17 +1,17 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from typing import List, Optional
 
 import fitz  # PyMuPDF
 import docx
 import google.generativeai as genai
 import uvicorn
+import anyio
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Настройка логирования
 logging.basicConfig(
@@ -150,7 +150,7 @@ app.add_middleware(
 )
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=2000)
 
 # --- Эндпоинты ---
 
@@ -162,7 +162,10 @@ async def chat(request: ChatRequest, req: Request):
     try:
         # Отправляем сообщение пользователя.
         # Системная инструкция уже "вшита" в модель при инициализации.
-        response = req.app.state.model.generate_content(request.message)
+        response = await anyio.to_thread.run_sync(
+            req.app.state.model.generate_content,
+            request.message,
+        )
         
         return {"response": response.text}
     
