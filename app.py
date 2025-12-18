@@ -170,10 +170,10 @@ async def chat(request: ChatRequest, req: Request):
         logger.error(f"Ошибка при генерации ответа: {e}")
         raise HTTPException(status_code=500, detail="Ошибка обработки запроса к AI")
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "ok", "model": MODEL_NAME}
-
+    
 # Статика (только для локальной разработки)
 if os.getenv("ENVIRONMENT", "development") != "production":
     if os.path.exists("index.html"): # Проверка наличия фронтенда
