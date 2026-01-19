@@ -31,7 +31,7 @@ if not GOOGLE_API_KEY:
 
 # Используем актуальную модель (1.5 Flash - быстрая и дешевая/бесплатная)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-DOCX_PATH = "data2.docx"
+DOCX_PATH = "data.docx"
 PDF_PATH = "data.pdf"
 
 genai.configure(api_key=GOOGLE_API_KEY)
