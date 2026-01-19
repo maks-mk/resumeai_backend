@@ -49,7 +49,15 @@ async def lifespan(app: FastAPI):
     Здесь мы собираем ВСЁ резюме в одну строку для максимального качества ответов.
     """
     # Собираем полный текст резюме из всех файлов
-    files_to_load = ["core.txt", "contacts.txt", "experience.txt", "skills.txt", "projects.txt"]
+    files_to_load = [
+        "core.txt", 
+        "contacts.txt", 
+        "experience.txt", 
+        "skills.txt", 
+        "projects.txt",
+        "education.txt",  
+        "about.txt"       
+    ]
     full_resume_content = []
 
     for filename in files_to_load:
