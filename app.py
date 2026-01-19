@@ -156,10 +156,9 @@ async def chat(request: ChatRequest, req: Request):
         raise HTTPException(status_code=500, detail="Ошибка обработки запроса к AI")
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "ok", "model": MODEL_NAME}
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
