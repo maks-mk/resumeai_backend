@@ -2,185 +2,164 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-import fitz  # PyMuPDF
-import docx
-import google.generativeai as genai
+from google import genai
 import uvicorn
 import anyio
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-# Настройка логирования
+# 1. Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка переменных окружения
 load_dotenv()
 
-# Конфигурация
+# 2. Проверка API ключа
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
-    logger.error("GOOGLE_API_KEY не найден в переменных окружения")
-    raise ValueError("GOOGLE_API_KEY обязателен")
+    raise ValueError("GOOGLE_API_KEY обязателен. Проверьте файл .env")
 
-# Используем актуальную модель (1.5 Flash - быстрая и дешевая/бесплатная)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-DOCX_PATH = "data.docx"
-PDF_PATH = "data.pdf"
+DATA_DIR = "data"
 
-genai.configure(api_key=GOOGLE_API_KEY)
 
-# --- Функции извлечения текста ---
-
-def extract_text_from_pdf(pdf_path: str) -> str:
-    text = ""
+def load_file(name: str) -> str:
+    """Загружает текст из файла в папке data."""
+    path = os.path.join(DATA_DIR, name)
+    if not os.path.exists(path):
+        logger.warning(f"Файл не найден: {path}")
+        return ""
     try:
-        with fitz.open(pdf_path) as doc:
-            for page in doc:
-                text += page.get_text()
-        return text
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
     except Exception as e:
-        logger.error(f"Ошибка при чтении PDF {pdf_path}: {e}")
+        logger.error(f"Ошибка чтения {path}: {e}")
         return ""
 
-def extract_text_from_docx(docx_path: str) -> str:
-    text = []
-    try:
-        doc = docx.Document(docx_path)
-        for para in doc.paragraphs:
-            if para.text.strip():
-                text.append(para.text)
-        
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = [cell.text for cell in row.cells if cell.text.strip()]
-                if row_text:
-                    text.append(" | ".join(row_text))
-        
-        return "\n".join(text)
-    except Exception as e:
-        logger.error(f"Ошибка при чтении DOCX {docx_path}: {e}")
-        return ""
-
-def load_resume_content() -> str:
-    """Пытается загрузить резюме из DOCX, затем из PDF."""
-    if os.path.exists(DOCX_PATH):
-        content = extract_text_from_docx(DOCX_PATH)
-        if content:
-            logger.info(f"Загружено из DOCX ({len(content)} символов)")
-            return content
-            
-    if os.path.exists(PDF_PATH):
-        content = extract_text_from_pdf(PDF_PATH)
-        if content:
-            logger.info(f"Загружено из PDF ({len(content)} символов)")
-            return content
-            
-    logger.warning("Файлы резюме не найдены.")
-    return ""
-
-# --- Жизненный цикл приложения ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Загружаем текст резюме
-    resume_text = load_resume_content()
+    """
+    Загружает контекст и инициализирует AI при старте приложения.
+    Здесь мы собираем ВСЁ резюме в одну строку для максимального качества ответов.
+    """
+    # Собираем полный текст резюме из всех файлов
+    files_to_load = ["core.txt", "contacts.txt", "experience.txt", "skills.txt", "projects.txt"]
+    full_resume_content = []
+
+    for filename in files_to_load:
+        content = load_file(filename)
+        if content:
+            full_resume_content.append(content)
     
-    if not resume_text:
-        logger.error("Критическая ошибка: Текст резюме пуст.")
-        # Можно либо остановить приложение, либо разрешить работу с заглушкой
-    
-    # 2. Формируем системный промпт (System Instruction)
-    # Это задает поведение модели один раз при инициализации
+    full_context_text = "\n\n".join(full_resume_content)
+
+    if not full_context_text:
+        logger.error("Критическая ошибка: Не удалось загрузить файлы резюме.")
+        full_context_text = "Информация о кандидате временно недоступна."
+
+    # Настраиваем личность бота
     system_instruction = f"""
-    Ты AI-ассистент рекрутера/посетителя сайта. Твоя цель — отвечать на вопросы о резюме кандидата (Колесников Максим).
+    Ты — профессиональный и дружелюбный AI-ассистент на сайте-портфолио Максима Колесникова.
     
-    ПРАВИЛА:
-    1. Отвечай ТОЛЬКО на основе предоставленного ниже текста резюме. Не выдумывай факты.
-    2. Отвечай в третьем лице (например: "Максим работал...", "Он знает..."). Не говори "Я".
-    3. Будь вежлив, краток и профессионален.
-    4. Если ответа нет в резюме, скажи: "К сожалению, в резюме нет этой информации".
-    5. Текст резюме:
-    
-    {resume_text}
+    ТВОЯ ЗАДАЧА:
+    Отвечать на вопросы посетителей (рекрутеров, коллег), используя ИСКЛЮЧИТЕЛЬНО предоставленный текст резюме.
+
+    ПРАВИЛА ПОВЕДЕНИЯ:
+    1. **Без лишних приветствий:** Если пользователь задал конкретный вопрос (например: "Какой стек?", "Где работал?"), ОТВЕЧАЙ СРАЗУ ПО СУТИ. Не пиши "Здравствуйте" и не представляйся, если вопрос подразумевает получение факта.
+    2. **Приветствие:** Здоровайся, ТОЛЬКО если сообщение пользователя состоит только из приветствия ("Привет", "Добрый день").
+    3. **Тон:** Общайся вежливо, уверенно, но без лишнего официоза. Используй третье лицо ("Максим умеет", "Он работал").
+    4. **Честность:** Не выдумывай факты. Если информации нет в тексте, скажи: "В резюме это не указано, но вы можете спросить у Максима лично".
+    5. **Формат:** Старайся отвечать связным текстом, используй списки только когда перечисляешь много пунктов.
+
+    ПОЛНОЕ РЕЗЮМЕ МАКСИМА:
+    {full_context_text}
     """
 
-    # 3. Инициализируем модель и сохраняем в state
     try:
-        # В Gemini 1.5 system_instruction передается здесь
-        app.state.model = genai.GenerativeModel(
-            model_name=MODEL_NAME,
-            system_instruction=system_instruction
-        )
-        # Создаем чат-сессию (если хотим помнить контекст беседы, 
-        # но для REST API часто проще генерировать ответ заново, 
-        # либо хранить историю на клиенте. Здесь используем простой generate_content)
-        logger.info(f"Модель {MODEL_NAME} инициализирована успешно.")
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        
+        # Сохраняем клиент и инструкцию в состояние приложения
+        app.state.client = client
+        app.state.system_instruction = system_instruction
+        
+        logger.info(f"Клиент Gemini ({MODEL_NAME}) инициализирован. Контекст загружен.")
+
     except Exception as e:
         logger.error(f"Ошибка инициализации Gemini: {e}")
-    
+
     yield
-    
-    # Очистка ресурсов (если нужно)
+
     logger.info("Приложение останавливается.")
 
-# --- Инициализация FastAPI ---
 
 app = FastAPI(title="Resume Chatbot API", lifespan=lifespan)
 
-# Настройка CORS
+# Разрешаем запросы с вашего сайта и локальной машины
 origins = [
     "https://maks-mk.github.io",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "http://localhost:5500",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins, # Лучше избегать "*", если возможно
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
-# --- Эндпоинты ---
 
 @app.post("/chat")
 async def chat(request: ChatRequest, req: Request):
-    if not hasattr(req.app.state, "model"):
-        raise HTTPException(status_code=503, detail="AI сервис временно недоступен")
+    
+    if not hasattr(req.app.state, "client"):
+        raise HTTPException(status_code=503, detail="AI сервис не инициализирован")
 
     try:
-        # Отправляем сообщение пользователя.
-        # Системная инструкция уже "вшита" в модель при инициализации.
-        response = await anyio.to_thread.run_sync(
-            req.app.state.model.generate_content,
-            request.message,
-        )
+        client = req.app.state.client
         
-        return {"response": response.text}
-    
+        # Формируем промпт. Контекст уже "вшит" в system_instruction,
+        # поэтому здесь мы просто передаем сообщение пользователя.
+        prompt = request.message
+
+        # Вызов Gemini через anyio (исправленный вариант с lambda)
+        # temperature=0.6 делает ответы чуть более живыми, но при этом точными
+        response = await anyio.to_thread.run_sync(
+            lambda: client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config={
+                    "system_instruction": req.app.state.system_instruction,
+                    "temperature": 0.6 
+                }
+            )
+        )
+
+        text = response.text if hasattr(response, "text") else str(response)
+
+        return {"response": text}
+
     except Exception as e:
         logger.error(f"Ошибка при генерации ответа: {e}")
         raise HTTPException(status_code=500, detail="Ошибка обработки запроса к AI")
 
-@app.api_route("/health", methods=["GET", "HEAD"])
+
+@app.get("/health")
 async def health_check():
     return {"status": "ok", "model": MODEL_NAME}
-    
-# Статика (только для локальной разработки)
-if os.getenv("ENVIRONMENT", "development") != "production":
-    if os.path.exists("index.html"): # Проверка наличия фронтенда
-        app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))

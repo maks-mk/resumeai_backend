@@ -1,8 +1,6 @@
 fastapi
 uvicorn
-pymupdf
 python-dotenv
-google-generativeai
+google-genai
 pydantic
 gunicorn
-python-docx
