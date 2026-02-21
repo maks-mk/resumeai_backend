@@ -6,6 +6,7 @@ from google import genai
 import uvicorn
 import anyio
 from dotenv import load_dotenv
+from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -114,6 +115,7 @@ origins = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "http://localhost:5500",
+    "http://localhost:3000",
 ]
 
 app.add_middleware(
@@ -131,21 +133,17 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest, req: Request):
-    
     if not hasattr(req.app.state, "client"):
         raise HTTPException(status_code=503, detail="AI сервис не инициализирован")
 
-    try:
-        client = req.app.state.client
-        
-        # Формируем промпт. Контекст уже "вшит" в system_instruction,
-        # поэтому здесь мы просто передаем сообщение пользователя.
-        prompt = request.message
+    client = req.app.state.client
+    prompt = request.message
 
-        # Вызов Gemini через anyio (исправленный вариант с lambda)
-        # temperature=0.6 делает ответы чуть более живыми, но при этом точными
-        response = await anyio.to_thread.run_sync(
-            lambda: client.models.generate_content(
+    # Создаем генератор, который будет по кусочкам отдавать текст из Gemini
+    def stream_generator():
+        try:
+            # Используем метод потоковой генерации (stream)
+            response = client.models.generate_content_stream(
                 model=MODEL_NAME,
                 contents=prompt,
                 config={
@@ -153,16 +151,16 @@ async def chat(request: ChatRequest, req: Request):
                     "temperature": 0.6 
                 }
             )
-        )
+            for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+        except Exception as e:
+            logger.error(f"Ошибка при потоковой генерации: {e}")
+            yield "\n[Системная ошибка: Не удалось завершить поток данных]"
 
-        text = response.text if hasattr(response, "text") else str(response)
-
-        return {"response": text}
-
-    except Exception as e:
-        logger.error(f"Ошибка при генерации ответа: {e}")
-        raise HTTPException(status_code=500, detail="Ошибка обработки запроса к AI")
-
+    # Возвращаем потоковый ответ
+    return StreamingResponse(stream_generator(), media_type="text/plain")
+    
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
