@@ -2,7 +2,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-from google import genai
+from openai import AsyncOpenAI
 import uvicorn
 import anyio
 from dotenv import load_dotenv
@@ -20,12 +20,13 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# 2. Проверка API ключа
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY обязателен. Проверьте файл .env")
+# 2. Проверка API ключа NVIDIA
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+if not NVIDIA_API_KEY:
+    raise ValueError("NVIDIA_API_KEY обязателен. Проверьте файл .env")
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+# Обновляем название модели по умолчанию
+MODEL_NAME = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 DATA_DIR = "data"
 
 
@@ -74,33 +75,33 @@ async def lifespan(app: FastAPI):
 
     # Настраиваем личность бота
     system_instruction = f"""
-    Ты — профессиональный и дружелюбный AI-ассистент на сайте-портфолио Максима Колесникова.
-    
-    ТВОЯ ЗАДАЧА:
-    Отвечать на вопросы посетителей (рекрутеров, коллег), используя ИСКЛЮЧИТЕЛЬНО предоставленный текст резюме.
+    Ты — личный ИИ-помощник на сайте-портфолио Максима Колесникова. Твоя задача — рассказывать рекрутерам и гостям о Максиме так, чтобы им не пришлось читать скучные ПДФ-ки. Будь дружелюбным, кратким и добавь капельку юмора!
 
-    ПРАВИЛА ПОВЕДЕНИЯ:
-    1. **Без лишних приветствий:** Если пользователь задал конкретный вопрос (например: "Какой стек?", "Где работал?"), ОТВЕЧАЙ СРАЗУ ПО СУТИ. Не пиши "Здравствуйте" и не представляйся, если вопрос подразумевает получение факта.
-    2. **Приветствие:** Здоровайся, ТОЛЬКО если сообщение пользователя состоит только из приветствия ("Привет", "Добрый день").
-    3. **Тон:** Общайся вежливо, уверенно, но без лишнего официоза. Используй третье лицо ("Максим умеет", "Он работал").
-    4. **Честность:** Не выдумывай факты. Если информации нет в тексте, скажи: "В резюме это не указано, но вы можете спросить у Максима лично".
-    5. **Формат:** Старайся отвечать связным текстом, используй списки только когда перечисляешь много пунктов.
+    Вот твои главные правила:
+    1. **Сразу к делу.** Если спросили «Какой стек?» — просто перечисли стек. Не надо расшаркиваться и писать «Здравствуйте, спасибо за ваш вопрос!». Здоровайся только в ответ на обычное «Привет».
+    2. **Максим — это он.** Говори о Максиме в третьем лице («Он работал», «Максим умеет»). Ты — лишь его верный цифровой помощник.
+    3. **Никакой отсебятины.** Отвечай СТРОГО на основе текста ниже. Если информации там нет, так и скажи: "В моей базе этого нет, но вы всегда можете спросить у самого Максима — он не кусается!".
+    4. **Легкость чтения.** Общайся живым языком. Не пиши «кирпичами» текста — используй абзацы и списки, где это уместно.
 
-    ПОЛНОЕ РЕЗЮМЕ МАКСИМА:
+    А вот и секретные материалы (резюме Максима):
     {full_context_text}
     """
-
+    
     try:
-        client = genai.Client(api_key=GOOGLE_API_KEY)
+        # Инициализируем клиента OpenAI, указывая API NVIDIA как base_url
+        client = AsyncOpenAI(
+            api_key=NVIDIA_API_KEY,
+            base_url="https://integrate.api.nvidia.com/v1"
+        )
         
         # Сохраняем клиент и инструкцию в состояние приложения
         app.state.client = client
         app.state.system_instruction = system_instruction
         
-        logger.info(f"Клиент Gemini ({MODEL_NAME}) инициализирован. Контекст загружен.")
+        logger.info(f"NVIDIA API Клиент ({MODEL_NAME}) инициализирован. Контекст загружен.")
 
     except Exception as e:
-        logger.error(f"Ошибка инициализации Gemini: {e}")
+        logger.error(f"Ошибка инициализации NVIDIA API: {e}")
 
     yield
 
@@ -136,35 +137,38 @@ async def chat(request: ChatRequest, req: Request):
     if not hasattr(req.app.state, "client"):
         raise HTTPException(status_code=503, detail="AI сервис не инициализирован")
 
-    client = req.app.state.client
+    client: AsyncOpenAI = req.app.state.client
     prompt = request.message
 
-    # Создаем генератор, который будет по кусочкам отдавать текст из Gemini
-    def stream_generator():
+    # Асинхронный генератор, который отдает текст по кусочкам
+    async def stream_generator():
         try:
-            # Используем метод потоковой генерации (stream)
-            response = client.models.generate_content_stream(
+            response = await client.chat.completions.create(
                 model=MODEL_NAME,
-                contents=prompt,
-                config={
-                    "system_instruction": req.app.state.system_instruction,
-                    "temperature": 0.6 
-                }
+                messages=[
+                    {"role": "system", "content": req.app.state.system_instruction},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.6,
+                stream=True,
+                max_tokens=1024 # Можно изменить при необходимости
             )
-            for chunk in response:
-                if chunk.text:
-                    yield chunk.text
+            
+            async for chunk in response:
+                # В структуре ответа OpenAI/NVIDIA текст находится в delta.content
+                if len(chunk.choices) > 0 and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
         except Exception as e:
             logger.error(f"Ошибка при потоковой генерации: {e}")
             yield "\n[Системная ошибка: Не удалось завершить поток данных]"
 
-    # Возвращаем потоковый ответ
+    # Возвращаем потоковый ответ (используем асинхронный генератор)
     return StreamingResponse(stream_generator(), media_type="text/plain")
     
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
-    return {"status": "ok", "model": MODEL_NAME}
+    return {"status": "ok", "model": MODEL_NAME, "provider": "nvidia"}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
