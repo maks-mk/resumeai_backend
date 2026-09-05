@@ -2,7 +2,8 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 import uvicorn
 import anyio
 from dotenv import load_dotenv
@@ -20,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# 2. Проверка API ключа NVIDIA
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-if not NVIDIA_API_KEY:
-    raise ValueError("NVIDIA_API_KEY обязателен. Проверьте файл .env")
+# 2. Проверка API ключа Google
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    raise ValueError("GOOGLE_API_KEY обязателен. Получите ключ в Google AI Studio и добавьте в .env")
 
-# Обновляем название модели по умолчанию
-MODEL_NAME = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
+# Название модели Gemini по умолчанию
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 DATA_DIR = "data"
 
 
@@ -88,20 +89,17 @@ async def lifespan(app: FastAPI):
     {full_context_text}
     """    
     try:
-        # Инициализируем клиента OpenAI, указывая API NVIDIA как base_url
-        client = AsyncOpenAI(
-            api_key=NVIDIA_API_KEY,
-            base_url="https://integrate.api.nvidia.com/v1"
-        )
+        # Инициализируем клиент Google GenAI (Gemini API)
+        client = genai.Client(api_key=GOOGLE_API_KEY)
         
         # Сохраняем клиент и инструкцию в состояние приложения
         app.state.client = client
         app.state.system_instruction = system_instruction
         
-        logger.info(f"NVIDIA API Клиент ({MODEL_NAME}) инициализирован. Контекст загружен.")
+        logger.info(f"Google Gemini клиент ({MODEL_NAME}) инициализирован. Контекст загружен.")
 
     except Exception as e:
-        logger.error(f"Ошибка инициализации NVIDIA API: {e}")
+        logger.error(f"Ошибка инициализации Google Gemini API: {e}")
 
     yield
 
@@ -137,29 +135,26 @@ async def chat(request: ChatRequest, req: Request):
     if not hasattr(req.app.state, "client"):
         raise HTTPException(status_code=503, detail="AI сервис не инициализирован")
 
-    client: AsyncOpenAI = req.app.state.client
+    client: genai.Client = req.app.state.client
     prompt = request.message
 
     # Асинхронный генератор, который отдает текст по кусочкам
     async def stream_generator():
         try:
-            response = await client.chat.completions.create(
+            response = await client.aio.models.generate_content_stream(
                 model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": req.app.state.system_instruction},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.75,
-                presence_penalty=0.4,     # Штрафует за заезженные фразы, заставляя использовать новые слова
-                frequency_penalty=0.3,    # Снижает вероятность повторения одних и тех же конструкций
-                stream=True,
-                max_tokens=1024 # Можно изменить при необходимости
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=req.app.state.system_instruction,
+                    temperature=0.75,
+                    max_output_tokens=1024
+                )
             )
             
             async for chunk in response:
-                # В структуре ответа OpenAI/NVIDIA текст находится в delta.content
-                if len(chunk.choices) > 0 and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                # Текст ответа находится в chunk.text (может быть None для служебных чанков)
+                if chunk.text:
+                    yield chunk.text
         except Exception as e:
             logger.error(f"Ошибка при потоковой генерации: {e}")
             yield "\n[Системная ошибка: Не удалось завершить поток данных]"
@@ -170,7 +165,7 @@ async def chat(request: ChatRequest, req: Request):
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
-    return {"status": "ok", "model": MODEL_NAME, "provider": "nvidia"}
+    return {"status": "ok", "model": MODEL_NAME, "provider": "google"}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
