@@ -5,30 +5,31 @@ from contextlib import asynccontextmanager
 from google import genai
 from google.genai import types
 import uvicorn
-import anyio
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# 1. Настройка логирования
+# 1. Определение путей и загрузка переменных окружения
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+# 2. Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-
-# 2. Проверка API ключа Google
+# 3. Проверка API ключа Google
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY обязателен. Получите ключ в Google AI Studio и добавьте в .env")
 
 # Название модели Gemini по умолчанию
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-DATA_DIR = "data"
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 
 def load_file(name: str) -> str:
@@ -118,14 +119,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Resume Chatbot API", lifespan=lifespan)
 
-# Разрешаем запросы с вашего сайта и локальной машины
-origins = [
+# Разрешаем запросы с сайта и локальной разработки
+default_origins = [
     "https://maks-mk.github.io",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "http://localhost:5500",
+    "http://127.0.0.1:5500",
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
 ]
+
+env_origins = [orig.strip() for orig in os.getenv("ALLOWED_ORIGINS", "").split(",") if orig.strip()]
+origins = list(set(default_origins + env_origins))
 
 app.add_middleware(
     CORSMiddleware,
@@ -142,40 +152,42 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest, req: Request):
-    if not hasattr(req.app.state, "client"):
+    if not hasattr(req.app.state, "client") or req.app.state.client is None:
         raise HTTPException(status_code=503, detail="AI сервис не инициализирован")
 
     client: genai.Client = req.app.state.client
     prompt = request.message
 
-    # Асинхронный генератор, который отдает текст по кусочкам
+    # Асинхронный генератор с потоковой отдачей через AsyncChat без лишнего AFC
     async def stream_generator():
         try:
-            response = await client.aio.models.generate_content_stream(
+            chat_session = client.aio.chats.create(
                 model=MODEL_NAME,
-                contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=req.app.state.system_instruction,
                     temperature=0.75,
-                    max_output_tokens=1024
-                )
+                    max_output_tokens=1024,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
+                ),
             )
+            response_stream = await chat_session.send_message_stream(prompt)
             
-            async for chunk in response:
-                # Текст ответа находится в chunk.text (может быть None для служебных чанков)
+            async for chunk in response_stream:
                 if chunk.text:
                     yield chunk.text
         except Exception as e:
             logger.error(f"Ошибка при потоковой генерации: {e}")
             yield "\n[Системная ошибка: Не удалось завершить поток данных]"
 
-    # Возвращаем потоковый ответ (используем асинхронный генератор)
     return StreamingResponse(stream_generator(), media_type="text/plain")
     
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "ok", "model": MODEL_NAME, "provider": "google"}
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
